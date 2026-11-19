@@ -10,6 +10,7 @@
 - The single main problem, and for whom (one sentence): A student or developer with a small Python project has a test that just started failing and wants a small, checked fix suggested without sending their code to an AI service.
 - Who is harmed if this app fails, is wrong, or leaks data? The user, if Patchwork saves a "fix" that makes the named test pass but breaks something no test covers, or if it changes their original files. Anyone who later uses that code is harmed too if the user merges a bad diff without reading it.
 - Anything the app must never do (privacy, safety, legal): It must never change the original project folder, never send code or results off the computer, never call an AI model, and never run any command except pytest. It must never present a candidate as "fixed" unless every test that passed before still passes.
+- Patchwork is **not a secure sandbox.** Running pytest runs the project's own code (tests, fixtures and imported modules), and that code could read files, use the network or write outside the copy. Working on a copy only protects the original from Patchwork's own edits. So this semester Patchwork runs only on our team-made sample project, which holds fictional data and no keys, passwords or personal information, and the README tells users not to run it on untrusted repositories.
 
 ## 1. Process and plan (Chapters 2 and 3)  Owner: Ishwar Jha
 - Process model we chose (plan-driven, incremental, or agile) and **why it fits this app** (2 sentences): We use an incremental, agile process with three short sprints. Patchwork splits into steps that each work on their own (copy, run tests, rank lines, try templates, report), so every sprint can end with a tool that runs, and the seeded-bug table tells us after each sprint whether the last change helped.
@@ -25,11 +26,11 @@
 
 | Sprint | Working software at the end | se-agent run? |
 |---|---|---|
-| 1 | `patchwork <folder> <test>` copies the project, runs pytest once, stops with a message if the named test passes, and prints the 20 highest Ochiai-ranked lines. Sample project with the first 5 seeded bugs. | Yes, run 1 (cheap model): requirements, models and architecture records from the Run Brief |
-| 2 | All six fix templates, the full-suite check after each candidate, the 200-candidate and 120-second limits, and the diff plus report files. Sample project grows to 10 seeded bugs. | Yes, run 2: design, implementation and test records, checked against our code |
+| 1 | The minimum working version: `patchwork <folder> <test>` copies the project, runs pytest once, stops with a message if the named test passes, ranks lines with Ochiai, tries one template (bound shift by 1) and accepts it only when the full suite passes. Sample project with the first 5 seeded bugs. | Yes, run 1 (cheap model): requirements, models and architecture records from the Run Brief |
+| 2 | The other five fix templates, the 200-candidate, 120-second and 10-second limits, and the diff plus report files. Sample project grows to 10 seeded bugs. | Yes, run 2: design, implementation and test records, checked against our code |
 | 3 | Evaluation script printing the 10-bug results table, README steps tested on a clean machine, and the demo. Should-do items only if time is left. | Optional run 3, only if run 2 left gaps |
 
-- Biggest schedule risk and what we will do about it: The coverage step (recording which lines each test runs with only the standard library) could take longer than planned. If it is not working by the middle of Sprint 1, we fall back to `sys.settrace` on the copied project only, which is slower but simple, and we keep the 120-second limit.
+- Biggest schedule risk and what we will do about it: The coverage step (recording which lines each test runs with only the standard library and pytest) could take longer than planned. We build it first in Sprint 1, test it on a three-function example before anything else depends on it, and if it is still not working by the middle of Sprint 1 we narrow it to the copied project's own files only, which keeps the trace small.
 - AI contribution: Claude (Opus 5.5) drafted this section from our Project Brief. The process choice, the three-sprint length and the Thursday-only meeting constraint come from the team.
 
 ## 2. Requirements (Chapter 4)  Owner (Product Owner): Zaid Sarwar
@@ -57,17 +58,18 @@
 | R1 | F | The tool takes a project folder path and a pytest test name, plus an optional note of 300 characters or fewer that is copied into the report. | Must | Valid folder, valid test name, 40-character note -> run starts and the note appears in the report; a 301-character note -> error message, nothing runs |
 | R2 | F | The tool works on a copy of the project and never writes inside the original folder. | Must | Any run -> checksums of the original folder match before and after |
 | R3 | F | The tool runs the suite once and stops with a clear message if the named test does not fail. | Must | Name of a passing test -> message "test does not fail" and exit code 1; no candidates tried |
-| R4 | F | The tool records the lines each test runs and scores every line with the Ochiai formula. | Must | Sample project, average() bug -> the line with the division ranks first or second |
-| R5 | F | The tool tries six templates (comparison swap, arithmetic swap, bound shift by 1, condition negation, and/or swap, empty-or-None guard) on the 20 highest-ranked lines, one change at a time. | Must | Seeded off-by-one bug -> the bound-shift template produces the accepted candidate |
-| R6 | F | A candidate counts as a fix only when the named test passes and every test that passed before still passes. | Must | Candidate that fixes the named test but breaks another -> rejected, search continues |
-| R7 | F | The tool saves a unified diff and a report with ranked lines and scores, template used, candidates tried and seconds taken. | Must | Successful run -> output folder holds patch.diff and report.txt with those fields |
-| R8 | F | An evaluation script runs the tool on a sample project with 10 seeded bugs and prints a results table. | Must | `uv run python evaluate.py` -> table with 10 rows and five columns |
-| R9 | NF (performance) | One run stops after 200 candidates or 120 seconds, whichever comes first, and still saves its report. | Must | Seeded bug no template covers -> finishes in 120 seconds or less with "not fixed" and a saved report |
+| R4 | F | The tool records the lines each test runs and scores every line with the Ochiai formula; lines no failing test runs score 0 and are skipped, and ties sort by file name, then line number. | Must | Sample project, average() bug -> the line with the division ranks first or second; hand-worked example in Section 3 -> scores match to 3 decimals |
+| R5 | F | The tool tries six templates (comparison swap, arithmetic swap, bound shift by 1, condition negation, and/or swap, empty-or-None guard) on the 20 highest-ranked lines, one AST node change at a time, and skips any candidate that does not parse. | Must | Seeded off-by-one bug -> the bound-shift template produces the accepted candidate; a line with `"<"` inside a string -> no candidate changes the string |
+| R6 | F | Every candidate starts from the unchanged copy, and it counts as a fix only when the named test passes and every test that passed before still passes. | Must | Candidate that fixes the named test but breaks another -> rejected, and the next candidate's file matches the copy except for its own one change |
+| R7 | F | The tool saves a unified diff and a report with ranked lines and scores, template used, candidates tried, candidates that did not parse and seconds taken. | Must | Successful run -> output folder holds patch.diff and report.txt with those fields |
+| R8 | F | An evaluation script runs the tool on the team-made sample project with 10 seeded bugs and prints one row per bug: bug ID, fixed or not, matches the known correct fix or not, template, candidates, seconds, plus a summary line with the share fixed and the share correct. | Must | `uv run python evaluate.py` -> table with 10 rows and six columns, then the summary line |
+| R9 | NF (performance) | One run stops after 200 candidates or 120 seconds, whichever comes first, and any single test run is killed after 10 seconds and counted as a rejected candidate; the report is still saved. | Must | Seeded bug no template covers -> finishes in 120 seconds or less with "not fixed" and a saved report; a candidate that turns a loop infinite -> killed at 10 seconds, search continues |
 | R10 | NF (usability) | All output is plain text, readable by a screen reader, and every error message says what to do next. | Must | Missing folder -> one line naming the path and the fix ("check the folder path") |
-| R11 | NF (security or privacy) | The tool runs no command except pytest, opens no network connection and never writes outside the copy. | Must | Run with networking disabled -> same result as with networking on; a code search finds one subprocess call, to pytest |
+| R11 | NF (security or privacy) | Patchwork's own code runs no command except pytest, opens no network connection and writes only inside the copy and the output folder; pytest runs with a scrubbed environment that passes no variables whose names contain KEY, TOKEN, SECRET or PASSWORD. | Must | A code search finds one subprocess call, to pytest; a test fixture that prints the environment -> no such variables appear |
 | R12 | NF (cost) | The tool calls no AI model and needs no API key, so each use costs $0. | Must | Run with no `.env` file and no key -> completes normally |
-| R13 | NF (reliability) | The same input always gives the same output. | Must | Run the same input twice -> the two diff files are byte-for-byte identical |
-| R14 | F | Open a pull request on a new branch instead of only saving a diff. | Should | Not tested this semester |
+| R13 | NF (reliability) | The same input always gives the same ranked lines, candidate order, chosen template and diff; elapsed seconds may differ. | Must | Run the same input twice -> identical patch.diff and identical report lines except the seconds line |
+| R14 | NF (safety) | Patchwork is documented and used only for trusted projects; the README states that it is not a sandbox and must not run untrusted repositories. | Must | README check -> the warning is in the first screen of the Usage section; the sample project holds only fictional data |
+| R15 | F | Open a pull request on a new branch instead of only saving a diff. | Should | Not tested this semester |
 
 **Out of scope** (so nobody builds it by accident):
 - Languages other than Python; projects with no tests or more than 50 Python files.
@@ -75,16 +77,20 @@
 - Writing the failing test for the user.
 - A web or chat interface.
 - Any AI model at run time.
+- Untrusted repositories, or any repository with real personal information, API keys or confidential code.
 
 **Requirements we removed as unnecessary, and why:**
 - AI-generated patches. Bhargav's first version was an AI agent. Zaid changed it on Nov 11 to rule-based templates, because an AI call would add cost, a key and output that changes between runs (it would break R12 and R13).
 - Growing the sample project from 10 to 15 seeded bugs. Moved to "Should do," because 10 already covers every template and two uncovered cases.
 
 **Open questions** (better listed than guessed):
-- How many of the 10 seeded bugs the six templates fix. The evaluation table answers it at the end of Sprint 2.
-- TODO: whether the standard-library tracer is fast enough on a 50-file project to stay inside 120 seconds. We will time it in Sprint 1.
+- How many of the 10 seeded bugs the six templates fix, and how many of those fixes match the known correct fix. The evaluation table answers it at the end of Sprint 2.
+- TODO: whether per-test tracing is fast enough on a 50-file project to stay inside 120 seconds. We will time it in Sprint 1.
+- TODO: whether the empty-or-None guard should return a fixed value (0, an empty list, None) or raise a clear error. We will decide from the seeded bugs in Sprint 2.
+- TODO: whether 10 seconds per test run is enough for every sample test. We will time the full suite before Sprint 2.
+- Decided (safety): no OS-level sandbox this semester. We limit use to the sample project instead (R14), and we list it as a known limit in Section 8.
 
-**Check:** We replaced "fast" with the 200-candidate and 120-second limits (R9), "secure" with the single pytest command and no network (R11), and "easy to read" with plain text and next-step error messages (R10).
+**Check:** We replaced "fast" with the 200-candidate, 120-second and 10-second limits (R9), "secure" with the single pytest command, the scrubbed environment and the trusted-projects rule (R11, R14), "same output" with the exact fields that must match (R13), and "easy to read" with plain text and next-step error messages (R10).
 - AI contribution: Claude drafted the stakeholder table, the user stories and the acceptance tests from our brief. The no-AI rule, the limits and the out-of-scope list are the team's (Zaid, Nov 11).
 
 ## 3. Models (Chapter 5)  Owner (Architect): Bhargav Gondesi
@@ -180,7 +186,7 @@ stateDiagram-v2
   Ranking --> Trying
   Trying --> Checking
   Checking --> Fixed: all earlier passes still pass
-  Checking --> Trying: candidate rejected
+  Checking --> Trying: candidate rejected or timed out
   Trying --> NotFixed: 200 candidates or 120 seconds
   Fixed --> Reported
   NotFixed --> Reported
@@ -188,7 +194,7 @@ stateDiagram-v2
   Reported --> [*]
 ```
 
-**Consistency check:** R13 (same input, same output) appeared in no model at first. We resolved it in the sequence model by fixing the order: lines sorted by score, then by file name and line number, and templates always tried in the order listed in R5. The note in RunRequest is needed by R1 and R7 only, so it is not passed to the search.
+**Consistency check:** R13 (same input, same output) appeared in no model at first. We resolved it in the sequence model by fixing the order: lines sorted by score, then by file name and line number, and templates always tried in the order listed in R5. R9's 10-second limit was missing from the state model, so Checking now also returns to Trying when a test run is killed. The note in RunRequest is needed by R1 and R7 only, so it is not passed to the search.
 - AI contribution: Claude drafted the four diagrams from our brief. The team checked that every message in the sequence diagram is an operation in Section 5.
 
 ## 4. Architecture (Chapter 6)  Owner (Architect): Bhargav Gondesi
@@ -204,7 +210,9 @@ stateDiagram-v2
 | D1 | Rule-based fix templates, no AI at run time | An AI agent that writes patches (Bhargav's first idea) | R12 and R13: $0 per use and the same output every time | Fixes are limited to the six templates; two seeded bugs are expected to stay "not fixed" |
 | D2 | Ochiai scoring for line ranking | Tarantula; ranking by recent edits | R4 names Ochiai, and it needs only pass or fail per test and the lines each test ran | Needs line coverage per test, which costs one traced run of the suite |
 | D3 | Every candidate is checked by rerunning the full suite | Rerun only the named test | R6: a fix must keep every earlier pass | Slower search, held in check by R9's limits |
-| D4 | Work only on a temporary copy | Edit in place and undo with git | R2: the original folder must never change | Disk use doubles for the length of the run (fine at 50 files or fewer) |
+| D4 | Work only on a temporary copy | Edit in place and undo with git | R2: the original folder must never change | Disk use doubles for the length of the run (fine at 50 files or fewer). The copy is not a security boundary (R14) |
+| D5 | Find edit targets with the `ast` module and change only that node's exact source span | Plain text search and replace on the line | R5: strings and comments must never be changed, and each candidate must parse | The rest of the file keeps its formatting, so the diff shows only the one change |
+| D6 | Kill any test run after 10 seconds and treat it as a rejected candidate | Wait for the 120-second total only | R9: a template can turn a loop infinite, and one hang must not use the whole budget | A slow but correct test could be rejected; we time the sample suite before Sprint 2 (open question) |
 
 - AI contribution: Claude drafted the alternatives and the decisions table. D1 is Zaid's ruling from Nov 11; the Ochiai and seeded-bug ideas are Bhargav's.
 
@@ -215,12 +223,24 @@ stateDiagram-v2
 |---|---|---|
 | `cli.py` | Zaid Sarwar | Reads the arguments, checks them (R1, R10), calls the other modules in order, prints the outcome |
 | `workspace.py` | Ishwar Jha | Makes the temporary copy and computes folder checksums (R2) |
-| `runner.py` | Bhargav Gondesi | Runs pytest on the copy and records pass or fail and lines run per test (R3, R11) |
+| `runner.py` and `patchwork_trace.py` | Bhargav Gondesi | Runs pytest on the copy with a scrubbed environment and a 10-second limit, and records pass or fail and lines run per test (R3, R9, R11) |
 | `ranker.py` | Bhargav Gondesi | Ochiai score per line and the sorted top 20 (R4, R13) |
 | `templates.py` | Bhargav Gondesi | The six fix templates, one function each (R5) |
 | `search.py` | Zaid Sarwar | Tries candidates, checks each with the runner, enforces the limits (R6, R9) |
 | `report.py` | Ishwar Jha | Writes patch.diff and report.txt (R7) |
 | `evaluate.py` and `sample_project/` | Ishwar Jha | The 10 seeded bugs and the results table (R8) |
+
+**How fault localization works (R4)**
+- Collecting coverage: `runner.py` starts pytest once on the copy with a small plugin of our own (`patchwork_trace.py`, loaded with `-p`). Around each test, the plugin turns on `sys.settrace`, records every (file, line) it runs inside the copy, and writes one JSON file mapping each test ID to its lines and its pass or fail result. This uses only the standard library and pytest.
+- Scoring: for each line, ef = failing tests that run it, nf = failing tests that do not, ep = passing tests that run it. Ochiai score = ef / sqrt((ef + nf) x (ef + ep)).
+- Worked example: the sample project has one failing test (average of an empty list) and four passing tests. The division line in `average()` is run by the failing test and by one passing test: 1 / sqrt((1 + 0) x (1 + 1)) = 0.707. The `return` line in a helper that all five tests run scores 1 / sqrt(1 x 5) = 0.447. A line only passing tests run has ef = 0, so it scores 0 and is skipped. The division line ranks first.
+- Ties and no coverage: equal scores sort by file name, then line number (R13). Lines no test runs never enter the list.
+
+**How a candidate is made safely (R5, R6)**
+- `templates.py` parses the file with `ast` and looks only at nodes whose line is the ranked line: Compare operators, BinOp operators, integer constants used as bounds, If and While conditions, BoolOp, and function arguments for the guard. Because targets are AST nodes, text inside strings and comments is never touched.
+- The template replaces only that node's exact span (from `ast.get_source_segment` and the node's column offsets), so the rest of the file keeps its formatting.
+- The new text is parsed again with `ast.parse`. A SyntaxError means the candidate is skipped and counted under "did not parse" in the report.
+- `search.py` keeps the copy's original text in memory, writes one candidate, runs the suite, then writes the original text back before the next candidate, so a rejected change never affects later tests.
 
 - Where the logic lives **apart from the display** (so it can be unit-tested): All logic is in the modules above, as small functions with one or two inputs and outputs. Only `cli.py` prints to the terminal, so every other function can be unit-tested without capturing output.
 - Design patterns we will use, and where (or "none yet"): Strategy, in `templates.py`: each template has the same two operations (`applies_to(line)` and `apply(line)`), so the search loops over a list of templates and adding one never touches the others.
@@ -237,16 +257,17 @@ stateDiagram-v2
 | R1 | tests/test_cli.py::test_note_over_300_chars_rejected | unit | Raise the limit to 400 in the code; the test must fail |
 | R2 | tests/test_workspace.py::test_original_folder_unchanged | system | Make the search write to the original path once; the checksum test must fail |
 | R3 | tests/test_runner.py::test_stops_when_named_test_passes | component | Name a test that fails; the test must fail because candidates start |
-| R4 | tests/test_ranker.py::test_ochiai_known_values | unit | Swap the formula's denominator; the hand-computed scores must not match |
-| R5 | tests/test_templates.py::test_each_template_one_change | unit | Make one template change two tokens; the one-change assertion must fail |
+| R4 | tests/test_ranker.py::test_ochiai_known_values | unit | Uses the worked example in Section 5 (0.707 and 0.447); swap the formula's denominator and the scores must not match |
+| R5 | tests/test_templates.py::test_each_template_one_change, ::test_string_literal_untouched | unit | Make one template change two tokens, or use plain text replace; the one-change or string assertion must fail |
 | R6 | tests/test_search.py::test_rejects_fix_that_breaks_other_test | component | Check only the named test; the seeded case must then wrongly report "fixed" |
 | R7 | tests/test_report.py::test_report_fields_present | unit | Remove the seconds field; the test must fail |
 | R8 | tests/test_evaluate.py::test_table_has_ten_rows | system | Remove one seeded bug; the row count must fail |
-| R9 | tests/test_search.py::test_stops_at_candidate_limit | component | Set the limit to 201; the counter assertion must fail |
+| R9 | tests/test_search.py::test_stops_at_candidate_limit, tests/test_runner.py::test_hanging_test_killed | component | Set the limit to 201, or remove the 10-second timeout; the counter or timing assertion must fail |
 | R10 | tests/test_cli.py::test_missing_folder_message | unit | Change the message text; the assertion must fail |
-| R11 | tests/test_runner.py::test_only_pytest_is_run | unit | Add a second subprocess call; the mock must record it and fail |
+| R11 | tests/test_runner.py::test_only_pytest_is_run, ::test_env_is_scrubbed | unit | Add a second subprocess call, or pass the full environment; the mock or the environment check must fail |
 | R12 | tests/test_cli.py::test_runs_without_env_or_key | system | Import an AI client at start; the run must error without a key |
-| R13 | tests/test_search.py::test_same_input_same_diff | system | Shuffle tied lines randomly; two runs must give different diffs |
+| R13 | tests/test_search.py::test_same_input_same_diff | system | Shuffle tied lines randomly; two runs must give different diffs or candidate orders |
+| R14 | tests/test_docs.py::test_readme_has_not_a_sandbox_warning | unit | Delete the warning from the README; the test must fail |
 
 **The three most important tests, in plain language** (input -> expected result):
 1. Sample project and the failing test for "average() crashes on an empty list" -> a ranked list, an accepted empty-input guard and a diff where all tests pass.
@@ -254,6 +275,7 @@ stateDiagram-v2
 3. The same folder and test run twice -> two byte-for-byte identical diff files, and the original folder's checksums unchanged.
 
 - Edge cases we will try to break each Must-do with (zero, negative, empty, huge, missing): an empty note and a note of exactly 300 characters; a missing folder; a folder with no tests; a test name that does not exist; a project of exactly 50 Python files and one of 51; a line ranked with a score of zero; a bug no template covers; a test that takes longer than 120 seconds on its own.
+- Passing tests versus a correct fix: a candidate can make every available test pass and still be wrong. For each seeded bug we keep the known correct fix and two extra hidden tests that the tool never sees. The evaluation script reports "fixed" (all visible tests pass) and "correct" (the diff matches the known fix, or the hidden tests also pass) as separate columns, and it also reports the share fixed, the share correct, candidates tried and candidates that did not parse.
 - User testing: one classmate outside the team who uses Python but has not seen Patchwork. They run it on the sample project from the README alone, and we want to learn whether the report tells them what changed and whether they would trust the diff.
 - What we are deliberately **not** testing, and why: projects over 50 files and multi-line bugs (out of scope), the pull-request Should-do (not built this semester), and Windows path quirks beyond one manual run on Zaid's PC.
 - Test command: `uv run pytest`
@@ -270,6 +292,7 @@ stateDiagram-v2
 - Whether `sys.settrace` coverage stays inside 120 seconds on a 50-file project (D2, R9).
 - Whether rerunning the full suite for every candidate is too slow with 20 lines times six templates (D3). If it is, we will order templates by how often they fixed seeded bugs, which still keeps R13.
 - Whether two uncovered seeded bugs out of 10 is the right share to show the tool's limits honestly.
+- Whether limiting use to our own sample project (R14) is enough safety without an OS-level sandbox. It is enough for this course; it would not be enough for real users.
 
 ## 9. Run plan and cost (se-agent)  Owner (Prompt engineer): Zaid Sarwar
 - Prompts in `prompts/` we will use, in order: ch02_software_processes, ch03_agile_development, ch04_requirements_engineering, ch05_system_modeling, ch06_architectural_design, ch07_design_implementation, ch08_software_testing, ch09_software_evolution. The router picks the order from each prompt's Role and Task; this is the order we expect. TODO: add an implementer prompt that writes .py files before run 2, because none of the eight writes code files.
@@ -284,10 +307,10 @@ stateDiagram-v2
 - Before we request a run, we confirmed: `uv run pytest` passes / Run Brief is 4,000 characters or fewer / each prompt follows the 8-section template
 
 ## 10. Run Brief
-The Run Brief is `docs/RUN_BRIEF.md`. It is the Project Brief we submitted on Wed Nov 11 (docs/project_brief.md), copied without changes.
+The Run Brief is `docs/RUN_BRIEF.md`. It starts from the Project Brief we submitted on Wed Nov 11 (docs/project_brief.md, 3,819 characters) and adds what the instructor's feedback asked for: the not-a-sandbox rule, AST-based edits, a fresh start for every candidate, the 10-second limit, tie handling, and "same output" defined without the seconds. We merged the nine Must-dos into eight, as the feedback suggested.
 
-- Characters in our Run Brief: 3,819
-- What we cut to fit, and why it was safe to cut: Nothing was cut from the Run Brief itself. This Full Spec holds what the brief leaves out (stakeholders, process, models, the decisions log and the test map), and the agents do not need those to draft the app, because every Must-do, limit and acceptance check they need is already in the brief in words.
+- Characters in our Run Brief: 3,961
+- What we cut to fit, and why it was safe to cut: the 15-bug Should-do (it stays in this Full Spec), "One terminal command runs it" (the README covers it), and two explanatory phrases. Stakeholders, process, the models, the decisions log and the test map stay only in this Full Spec, because the agents need the Must-dos, limits and acceptance checks to draft the app, and those are all in the Run Brief in words.
 
 ## 11. Presentation notes (six beats; every member speaks)
 | Beat | Who | One sentence we will say |
@@ -297,4 +320,4 @@ The Run Brief is `docs/RUN_BRIEF.md`. It is the Project Brief we submitted on We
 | 3. Context model and one more model (Ch 5) | Bhargav Gondesi | The context model shows Patchwork only reads the original folder and only runs pytest, and the state model shows it always ends in a saved report. |
 | 4. One architecture decision: chosen, rejected, which requirement forced it (Ch 6) | Bhargav Gondesi | We chose rule-based templates over an AI agent, because R12 and R13 require $0 per use and the same output every time. |
 | 5. Three most important tests, and how we know they can fail (Ch 8) | Ishwar Jha | Our key tests prove the original folder never changes, a fix that breaks another test is rejected, and two runs give the same diff, and each one fails when we break that rule on purpose. |
-| 6. Likely change, Run Brief, cost plan (Ch 9, 4) | Zaid Sarwar | A new template touches one file and one test, our Run Brief is 3,819 characters, and each se-agent run costs about two cents on gpt-6-luna. |
+| 6. Likely change, Run Brief, cost plan (Ch 9, 4) | Zaid Sarwar | A new template touches one file and one test, our Run Brief is 3,961 characters, and each se-agent run costs about two cents on gpt-6-luna. |
